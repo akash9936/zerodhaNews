@@ -1,0 +1,13 @@
+# Web Scraping
+selenium==4.15.2
+webdriver-manager==4.0.1
+requests==2.31.0
+beautifulsoup4==4.12.2
+
+# OpenAI and Environment
+openai==1.12.0
+python-dotenv==1.0.1
+
+# Utilities
+json5==0.9.14
+markdown==3.5.2
