@@ -1,46 +1,113 @@
 from selenium import webdriver
-from selenium.webdriver.safari.options import Options as SafariOptions
+from selenium.webdriver.chrome.options import Options as ChromeOptions
+from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import WebDriverException, TimeoutException
 import json
-from datetime import datetime
+from datetime import datetime, date, timedelta
 import time
 import sys
 
-def check_safari_setup():
+# ===== CONFIGURABLE PARAMETERS =====
+# Set your desired start date and time here (in IST)
+START_DATE = "27 May 2025"  # Format: "DD MMM YYYY"
+START_TIME = "12:00 AM"     # Format: "HH:MM AM/PM"
+# ==================================
+
+def parse_start_datetime():
     """
-    Check if Safari is properly set up for automation
+    Parse the configured start date and time into a datetime object
+    Input time is already in IST, so no need to add offset
     """
-    print("Checking Safari setup...")
-    print("\nPlease ensure you have:")
-    print("1. Enabled the Develop menu in Safari (Safari > Settings > Advanced > Show Develop menu)")
-    print("2. Enabled Remote Automation (Develop > Allow Remote Automation)")
-    print("3. Trusted the WebDriver in System Preferences > Security & Privacy")
-    print("\nPress Enter to continue or Ctrl+C to exit...")
-    input()
+    try:
+        # Combine date and time strings
+        datetime_str = f"{START_TIME}, {START_DATE}"
+        # Parse into datetime object (already in IST)
+        start_datetime = datetime.strptime(datetime_str, "%I:%M %p, %d %b %Y")
+        return start_datetime
+    except ValueError as e:
+        print(f"Error parsing start date/time: {e}")
+        print("Please check the format of START_DATE and START_TIME")
+        sys.exit(1)
+
+def get_ist_time():
+    """
+    Get current time in IST (UTC+5:30)
+    """
+    # Get UTC time and add 5 hours and 30 minutes for IST
+    utc_now = datetime.utcnow()
+    ist_time = utc_now + timedelta(hours=5, minutes=30)
+    return ist_time
+
+def is_within_time_range(time_text):
+    """
+    Check if the news item is within the configured time range
+    """
+    # Get start time and current time in IST
+    start_time_ist = parse_start_datetime()  # Already in IST
+    current_time_ist = get_ist_time()
+    
+    # Try to parse different date formats
+    try:
+        # Handle "X hours/minutes ago" format
+        if 'ago' in time_text.lower():
+            # For "ago" format, we'll consider it within range
+            # as it's recent enough to be after our start time
+            return True
+            
+        # Handle "Today at HH:MM" format
+        if 'today' in time_text.lower():
+            # For "today" format, we'll check if it's after our start time
+            return current_time_ist >= start_time_ist
+            
+        # Handle IST format (e.g., "12:27 AM, 27 May 2025")
+        try:
+            # Parse the date string (already in IST)
+            news_datetime = datetime.strptime(time_text, "%I:%M %p, %d %b %Y")
+            
+            # Check if news time is between start time and current time
+            return start_time_ist <= news_datetime <= current_time_ist
+            
+        except ValueError as e:
+            print(f"Could not parse date format: {time_text}")
+            return False
+            
+    except Exception as e:
+        print(f"Error parsing date '{time_text}': {e}")
+        return False
+    
+    return False
 
 def scrape_pulse_zerodha():
     """
-    Simple script to scrape Zerodha Pulse website using Safari on macOS.
-    Safari WebDriver is built into macOS and doesn't have the security issues of ChromeDriver.
+    Script to scrape Zerodha Pulse website using Chrome in headless mode.
+    Fetches news from configured start time until current time.
     """
-    print("Starting Zerodha Pulse scraper using Safari...")
+    print("Starting Zerodha Pulse scraper using Chrome in headless mode...")
     
-    # Check Safari setup first
-    check_safari_setup()
+    # Get time range for logging
+    start_time_ist = parse_start_datetime()
+    current_time_ist = get_ist_time()
+    print(f"Fetching news from: {start_time_ist.strftime('%I:%M %p, %d %b %Y')}")
+    print(f"Until current time: {current_time_ist.strftime('%I:%M %p, %d %b %Y')}")
     
     # URL of the website
     url = "https://pulse.zerodha.com/"
     
-    # Set up Safari options
-    safari_options = SafariOptions()
+    # Set up Chrome options for headless mode
+    chrome_options = ChromeOptions()
+    chrome_options.add_argument('--headless')
+    chrome_options.add_argument('--disable-gpu')
+    chrome_options.add_argument('--no-sandbox')
+    chrome_options.add_argument('--disable-dev-shm-usage')
+    chrome_options.add_argument('--window-size=1920,1080')
     
     try:
-        # Create Safari browser instance - Safari WebDriver is built into macOS
-        print("Initializing Safari WebDriver...")
-        driver = webdriver.Safari(options=safari_options)
+        # Create Chrome browser instance
+        print("Initializing Chrome WebDriver in headless mode...")
+        driver = webdriver.Chrome(options=chrome_options)
         
         # Load the page
         print("Loading Zerodha Pulse website...")
@@ -59,7 +126,7 @@ def scrape_pulse_zerodha():
         try:
             # Find all news items (li elements with class 'box item')
             items = wait.until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, "#news li.box.item")))
-            print(f"Found {len(items)} news items")
+            print(f"Found {len(items)} total news items")
             
             # Process each news item
             for i, item in enumerate(items, 1):
@@ -84,6 +151,10 @@ def scrape_pulse_zerodha():
                     except:
                         time_text = "Unknown time"
                         
+                    # Skip if not within time range
+                    if not is_within_time_range(time_text):
+                        continue
+                        
                     try:
                         source_element = item.find_element(By.CLASS_NAME, "feed")
                         source = source_element.text.strip().replace("—", "").strip()
@@ -100,15 +171,16 @@ def scrape_pulse_zerodha():
                     }
                     
                     news_items.append(news_item)
-                    print(f"Article {i}: {headline[:50]}...")
+                    print(f"Article {len(news_items)}: {headline[:50]}...")
                     
                 except Exception as e:
                     print(f"Error processing article {i}: {e}")
                     continue
             
-            # Save to JSON file
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"pulse_news_{timestamp}.json"
+            # Save to JSON file with time range in filename
+            start_str = start_time_ist.strftime("%Y%m%d_%H%M")
+            end_str = current_time_ist.strftime("%Y%m%d_%H%M")
+            filename = f"pulse_news_{start_str}_to_{end_str}.json"
             
             with open(filename, 'w', encoding='utf-8') as f:
                 json.dump(news_items, f, indent=4, ensure_ascii=False)
@@ -125,11 +197,10 @@ def scrape_pulse_zerodha():
             raise e
         
     except WebDriverException as e:
-        print("\nSafari WebDriver Error:")
+        print("\nChrome WebDriver Error:")
         print("Please make sure you have:")
-        print("1. Enabled the Develop menu in Safari (Safari > Settings > Advanced > Show Develop menu)")
-        print("2. Enabled Remote Automation (Develop > Allow Remote Automation)")
-        print("3. Trusted the WebDriver in System Preferences > Security & Privacy")
+        print("1. Chrome browser installed")
+        print("2. ChromeDriver installed and in your PATH")
         print(f"\nTechnical error: {e}")
         return None
     except Exception as e:

@@ -14,6 +14,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import WebDriverException, TimeoutException
 from dotenv import load_dotenv
+from bs4 import BeautifulSoup
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -50,134 +51,115 @@ def check_safari_setup():
     print("\nPress Enter to continue or Ctrl+C to exit...")
     input()
 
-def scrape_pulse_zerodha() -> Optional[List[Dict]]:
-    """Scrape news from Zerodha Pulse website using Safari."""
-    print("Starting Zerodha Pulse scraper using Safari...")
-    
-    # Check Safari setup first
-    check_safari_setup()
-    
-    # Create data directory if it doesn't exist
-    os.makedirs('data', exist_ok=True)
-    
-    # Get current timestamp for the filename
-    current_time = datetime.now()
-    date_str = current_time.strftime('%Y-%m-%d')
-    time_str = current_time.strftime('%H-%M-%S')
+def scrape_pulse_zerodha():
+    """
+    Script to scrape Zerodha Pulse website using requests and BeautifulSoup
+    """
+    print("Starting Zerodha Pulse scraper...")
     
     # URL of the website
     url = "https://pulse.zerodha.com/"
     
-    # Set up Safari options
-    safari_options = SafariOptions()
-    
     try:
-        # Create Safari browser instance
-        print("Initializing Safari WebDriver...")
-        driver = webdriver.Safari(options=safari_options)
+        # Make the request with proper headers
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+        }
         
-        # Load the page
-        print("Loading Zerodha Pulse website...")
-        driver.get(url)
+        print("Fetching news from Zerodha Pulse...")
+        response = requests.get(url, headers=headers, timeout=30)
+        response.raise_for_status()
         
-        # Wait for the news list to load
-        print("Waiting for news list to load...")
-        wait = WebDriverWait(driver, 15)
+        # Parse the HTML
+        soup = BeautifulSoup(response.text, 'html.parser')
         
-        # Wait for the news list to be present
-        news_list = wait.until(EC.presence_of_element_located((By.ID, "news")))
-        print("Found news list")
-        
-        # Wait for news items to be present
+        # Find the news list
         news_items = []
-        try:
-            # Find all news items
-            items = wait.until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, "#news li.box.item")))
-            print(f"Found {len(items)} news items")
-            
-            # Process each news item
-            for i, item in enumerate(items, 1):
-                try:
-                    # Extract headline
-                    headline_element = item.find_element(By.CSS_SELECTOR, "h2.title a")
-                    headline = headline_element.text.strip()
-                    
-                    # Extract description
-                    try:
-                        desc_element = item.find_element(By.CLASS_NAME, "desc")
-                        description = desc_element.text.strip()
-                    except:
-                        description = ""
-                    
-                    # Extract date and source
-                    try:
-                        date_element = item.find_element(By.CLASS_NAME, "date")
-                        time_text = date_element.get_attribute("title")
-                        if not time_text:
-                            time_text = date_element.text.strip()
-                    except:
-                        time_text = "Unknown time"
-                        
-                    try:
-                        source_element = item.find_element(By.CLASS_NAME, "feed")
-                        source = source_element.text.strip().replace("—", "").strip()
-                    except:
-                        source = "Unknown source"
-                    
-                    # Create news item dictionary
-                    news_item = {
-                        'headline': headline,
-                        'description': description,
-                        'source': source,
-                        'time': time_text,
-                        'url': headline_element.get_attribute("href")
-                    }
-                    
-                    news_items.append(news_item)
-                    print(f"Article {i}: {headline[:50]}...")
-                    
-                except Exception as e:
-                    print(f"Error processing article {i}: {e}")
-                    continue
-            
-            # Save to JSON file in data directory with new format
-            filename = os.path.join('data', f"zerodha_pulse_news_{date_str}_{time_str}.json")
-            
-            with open(filename, 'w', encoding='utf-8') as f:
-                json.dump(news_items, f, indent=4, ensure_ascii=False)
-            
-            print(f"\nSuccessfully scraped {len(news_items)} news items")
-            print(f"Data saved to {filename}")
-            
-            return news_items
-            
-        except TimeoutException as e:
-            print("\nTimeout waiting for news items to load.")
-            print("Current page source preview:")
-            print(driver.page_source[:500] + "...")
-            raise e
+        news_list = soup.find('ul', id='news')
         
-    except WebDriverException as e:
-        print("\nSafari WebDriver Error:")
-        print("Please make sure you have:")
-        print("1. Enabled the Develop menu in Safari")
-        print("2. Enabled Remote Automation")
-        print("3. Trusted the WebDriver in System Preferences")
-        print(f"\nTechnical error: {e}")
+        if not news_list:
+            print("Warning: News list not found in the page")
+            return None
+            
+        items = news_list.find_all('li', class_='box item')
+        print(f"Found {len(items)} total news items")
+        
+        for idx, item in enumerate(items, 1):
+            try:
+                # Extract headline with safe navigation
+                headline_elem = item.select_one('h2.title a')
+                if not headline_elem:
+                    print(f"Skipping item {idx}: No headline found")
+                    continue
+                    
+                headline = headline_elem.get_text(strip=True)
+                if not headline:
+                    print(f"Skipping item {idx}: Empty headline")
+                    continue
+                
+                # Extract description with safe navigation
+                desc_elem = item.select_one('div.desc')
+                description = desc_elem.get_text(strip=True) if desc_elem else ""
+                
+                # Extract date with safe navigation
+                date_elem = item.select_one('div.date')
+                time_text = ""
+                if date_elem:
+                    time_text = date_elem.get('title', '') or date_elem.get_text(strip=True)
+                if not time_text:
+                    time_text = "Unknown time"
+                
+                # Extract source with safe navigation
+                source_elem = item.select_one('div.feed')
+                source = "Unknown source"
+                if source_elem:
+                    source = source_elem.get_text(strip=True).replace("—", "").strip()
+                
+                # Get URL with safe navigation
+                url = headline_elem.get('href', '')
+                
+                # Create news item
+                news_item = {
+                    'headline': headline,
+                    'description': description,
+                    'source': source,
+                    'time': time_text,
+                    'url': url
+                }
+                
+                news_items.append(news_item)
+                print(f"Article {len(news_items)}: {headline[:50]}...")
+                
+            except Exception as e:
+                print(f"Error processing article {idx}: {str(e)}")
+                continue
+        
+        if not news_items:
+            print("Warning: No valid news items were extracted")
+            return None
+            
+        # Save to JSON file
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"pulse_news_{timestamp}.json"
+        
+        with open(filename, 'w', encoding='utf-8') as f:
+            json.dump(news_items, f, indent=4, ensure_ascii=False)
+        
+        print(f"\nSuccessfully scraped {len(news_items)} news items")
+        print(f"Data saved to {filename}")
+        
+        return news_items
+        
+    except requests.exceptions.RequestException as e:
+        print(f"Network error occurred: {str(e)}")
         return None
     except Exception as e:
-        print(f"\nAn error occurred: {e}")
-        if 'driver' in locals():
-            print("\nPage source preview:")
-            print(driver.page_source[:1000] + "...")
+        print(f"An unexpected error occurred: {str(e)}")
         return None
-    finally:
-        # Always close the browser
-        print("\nClosing browser...")
-        try:
-            driver.quit()
-        except:
-            pass
 
 class StreamlinedFinancialNewsAnalyzer:
     def __init__(self, groq_token: Optional[str] = None):
@@ -259,9 +241,28 @@ class StreamlinedFinancialNewsAnalyzer:
             combined_text = f"{headline} {description}"
             
             # High impact keywords
-            high_impact_words = ['results', 'earnings', 'profit', 'loss', 'merger', 'acquisition', 
-                               'ipo', 'dividend', 'buyback', 'split', 'delisting', 'rating', 
-                               'upgrade', 'downgrade', 'target', 'recommendation']
+            high_impact_words = [
+    # Corporate Actions
+    'results', 'earnings', 'profit', 'loss', 'merger', 'acquisition', 
+    'ipo', 'dividend', 'buyback', 'split', 'delisting', 'rating', 
+    'upgrade', 'downgrade', 'target', 'recommendation',
+    
+    # Financial Metrics
+    'revenue', 'growth', 'margin', 'ebitda', 'pat', 'eps',
+    'guidance', 'forecast', 'outlook', 'projection',
+    
+    # Corporate Events
+    'launch', 'expansion', 'investment', 'capex', 'order', 'contract',
+    'deal', 'partnership', 'collaboration', 'venture',
+    
+    # Market Actions
+    'circuit', 'upper circuit', 'lower circuit', 'breakout', 'breakdown',
+    'surge', 'plunge', 'rally', 'correction', 'volatility',
+    
+    # Analyst Actions
+    'initiate', 'maintain', 'retain', 'revise', 'cut', 'raise',
+    'bullish', 'bearish', 'neutral', 'outperform', 'underperform'
+]
             
             for word in high_impact_words:
                 if word in combined_text:
