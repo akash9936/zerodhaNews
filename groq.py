@@ -196,6 +196,7 @@ FORMAT YOUR RESPONSE EXACTLY LIKE THIS:
 - List broader economic/policy impacts that affect markets
 - Include government policies, international developments, regulatory changes
 - Focus on items that impact overall market sentiment
+- Include economic indicators and market sentiment
 
 **Corporate Actions** 🗓️🏢
 - List specific companies with earnings results, dividend announcements, business updates

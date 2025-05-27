@@ -5,7 +5,7 @@ import logging
 import requests
 import re
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 from selenium import webdriver
 from selenium.webdriver.safari.options import Options as SafariOptions
@@ -15,10 +15,18 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import WebDriverException, TimeoutException
 from dotenv import load_dotenv
 from bs4 import BeautifulSoup
+from telegram_bot import TelegramBot
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# IST is UTC+5:30
+IST_OFFSET = timedelta(hours=5, minutes=30)
+
+def get_ist_time() -> datetime:
+    """Get current time in IST."""
+    return datetime.utcnow() + IST_OFFSET
 
 def get_groq_token() -> Optional[str]:
     """Get Groq API token with validation."""
@@ -50,6 +58,65 @@ def check_safari_setup():
     print("3. Trusted the WebDriver in System Preferences > Security & Privacy")
     print("\nPress Enter to continue or Ctrl+C to exit...")
     input()
+
+def parse_news_time(time_text: str) -> datetime:
+    """Parse news time text into datetime object in IST."""
+    try:
+        # Handle unknown or empty time values
+        if not time_text or time_text.lower() == 'unknown time':
+            # Return current time for unknown times
+            return get_ist_time()
+            
+        # Handle different time formats
+        time_text = time_text.lower().strip()
+        now = get_ist_time()
+        
+        if 'today' in time_text:
+            # Format: "Today, 10:30 AM"
+            time_str = time_text.replace('today,', '').strip()
+            time_obj = datetime.strptime(time_str, '%I:%M %p')
+            return now.replace(hour=time_obj.hour, minute=time_obj.minute, second=0, microsecond=0)
+            
+        elif 'yesterday' in time_text:
+            # Format: "Yesterday, 10:30 AM"
+            time_str = time_text.replace('yesterday,', '').strip()
+            time_obj = datetime.strptime(time_str, '%I:%M %p')
+            yesterday = now - timedelta(days=1)
+            return yesterday.replace(hour=time_obj.hour, minute=time_obj.minute, second=0, microsecond=0)
+            
+        else:
+            # Format: "26 May 2025, 10:30 AM"
+            try:
+                dt = datetime.strptime(time_text, '%d %b %Y, %I:%M %p')
+                return dt + IST_OFFSET
+            except ValueError:
+                # Try alternate format: "10:30 AM, 26 May 2025"
+                try:
+                    dt = datetime.strptime(time_text, '%I:%M %p, %d %b %Y')
+                    return dt + IST_OFFSET
+                except ValueError:
+                    # If all parsing attempts fail, return current time
+                    logger.warning(f"Could not parse time '{time_text}', using current time")
+                    return get_ist_time()
+                
+    except Exception as e:
+        logger.warning(f"Error parsing time '{time_text}', using current time: {str(e)}")
+        return get_ist_time()
+
+def is_within_last_12_hours(time_text: str) -> bool:
+    """Check if the news time is within last 12 hours."""
+    try:
+        news_time = parse_news_time(time_text)
+        if not news_time:
+            return False
+            
+        current_time = get_ist_time()
+        time_diff = current_time - news_time
+        
+        return time_diff <= timedelta(hours=12)
+    except Exception as e:
+        logger.error(f"Error checking time range: {str(e)}")
+        return False
 
 def scrape_pulse_zerodha():
     """
@@ -87,6 +154,8 @@ def scrape_pulse_zerodha():
             
         items = news_list.find_all('li', class_='box item')
         print(f"Found {len(items)} total news items")
+      
+        print(f"Processing latest {len(items)} news items")
         
         for idx, item in enumerate(items, 1):
             try:
@@ -139,17 +208,20 @@ def scrape_pulse_zerodha():
                 continue
         
         if not news_items:
-            print("Warning: No valid news items were extracted")
+            print("Warning: No valid news items were found")
             return None
             
-        # Save to JSON file
+        # Create data directory if it doesn't exist
+        os.makedirs('data', exist_ok=True)
+            
+        # Save to JSON file in data directory
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"pulse_news_{timestamp}.json"
+        filename = os.path.join('data', f"pulse_news_{timestamp}.json")
         
         with open(filename, 'w', encoding='utf-8') as f:
             json.dump(news_items, f, indent=4, ensure_ascii=False)
         
-        print(f"\nSuccessfully scraped {len(news_items)} news items")
+        print(f"\nSuccessfully scraped {len(news_items)} latest news items")
         print(f"Data saved to {filename}")
         
         return news_items
@@ -269,8 +341,32 @@ class StreamlinedFinancialNewsAnalyzer:
                     score += 3
             
             # Market moving events
-            market_movers = ['fii', 'dii', 'rbi', 'sebi', 'government', 'policy', 'tax', 
-                           'interest rate', 'inflation', 'gdp', 'budget']
+            market_movers = [
+                # Existing terms
+                'fii', 'dii', 'rbi', 'sebi', 'government', 'policy', 'tax', 
+                'interest rate', 'inflation', 'gdp', 'budget',
+                
+                # Market Structure
+                'sensex', 'nifty', 'bullish', 'bearish', 'correction', 'rally',
+                'volatility', 'consolidation',
+                
+                # Technical Analysis
+                'sma', 'ema', 'resistance', 'support', 'breakout', 'breakdown',
+                'volume', 'technical', 'pattern',
+                
+                # Corporate Actions
+                'merger', 'acquisition', 'm&a', 'dividend', 'buyback',
+                'earnings', 'results', 'quarterly', 'guidance', 'outlook',
+                
+                # Sectors
+                'banking', 'finance', 'it', 'auto', 'pharma', 'realty',
+                'infrastructure', 'cement', 'energy', 'power', 'oil',
+                'defense', 'aerospace',
+                
+                # Global Markets
+                'futures', 'dow', 'nasdaq', 'asian', 'european',
+                'tariff', 'trade', 'commodity', 'gold', 'crude'
+            ]
             
             for word in market_movers:
                 if word in combined_text:
@@ -322,20 +418,35 @@ class StreamlinedFinancialNewsAnalyzer:
         # Prepare concise news summary
         news_summary = self.prepare_concise_batch_summary(batch)
         
-        # Create focused prompt for structured insights
+        # Create focused prompt for structured insights with exact format
         prompt = f"""Extract structured insights from this news batch. Focus on specific companies, sectors, and actionable information.
 
 NEWS BATCH {batch_num}/{total_batches}:
 {news_summary}
 
-Extract and organize:
-1. SECTOR DEVELOPMENTS: Which sectors have significant news with specific company names and developments
-2. STOCK RECOMMENDATIONS: Any buy/sell recommendations, analyst calls, or breakout stocks mentioned
-3. EARNINGS/CORPORATE ACTIONS: Companies reporting results, dividends, business updates with specific numbers
-4. MACRO/POLICY NEWS: Government policies, regulatory changes, economic developments affecting markets
+Extract and organize in EXACTLY this format:
 
-Include specific company names, actual figures (revenue, profit, growth %), and concrete details from the news.
-Keep response under 300 words but include all key details."""
+**Key Sector Trends** 🌍📈
+- List sector-specific developments with company names and concrete details
+- Include actual numbers and percentages where available
+- Focus on market-moving news
+
+**Buy/Sell Opportunities** 💰🔍
+- Buy: List specific stocks with clear reasoning and target prices
+- Sell/Avoid: List stocks to avoid with specific reasons
+- Include analyst recommendations and technical levels
+
+**Macro Implications** 🏦📉
+- List government policies and regulatory changes
+- Include economic indicators and market sentiment
+- Focus on items affecting overall market direction
+
+**Corporate Actions** 🗓️🏢
+- List earnings results with specific numbers
+- Include dividend announcements and business updates
+- Mention upcoming corporate events
+
+Keep each point concise but include specific company names, figures, and concrete details."""
         
         return self.query_groq_model(prompt)
 
@@ -356,7 +467,7 @@ Keep response under 300 words but include all key details."""
         
         sector_text = ", ".join([f"{sector.title()}({count})" for sector, count in sector_summary.items() if count > 0])
         
-        consolidation_prompt = f"""You are a financial analyst. Create a structured report from these news insights in the EXACT format shown below.
+        consolidation_prompt = f"""You are a senior financial analyst. Create a structured report from these news insights in the EXACT format shown below.
 
 SECTOR DISTRIBUTION: {sector_text}
 TOTAL NEWS ANALYZED: {total_items}
@@ -443,6 +554,7 @@ Use bullet points with clear company names and specific details. Keep each point
         sector_text = " | ".join([f"{sector.title()}: {count}" 
                                  for sector, count in results['sector_summary'].items() if count > 0])
         
+        # Create report with exact box formatting and emojis
         report = f"""
 ╔══════════════════════════════════════════════════════════════════╗
 ║                📈 STRUCTURED FINANCIAL NEWS REPORT 📈            ║
@@ -453,30 +565,35 @@ Use bullet points with clear company names and specific details. Keep each point
 
 {results['final_report']}
 
-*Note: The news analysis is based on {results['total_news_items']} items processed through {results['api_calls_used']} AI analysis calls for comprehensive coverage.*
+📌 *Note: Analysis based on {results['total_news_items']} items processed through {results['api_calls_used']} AI analysis calls for comprehensive coverage.*
 """
         return report
 
     def save_report(self, report: str, filename: str = None) -> str:
-        """Save the report to a file."""
+        """Save the report to a file with consistent naming."""
         if not filename:
-            # Get current date and time in a readable format
-            current_time = datetime.now()
-            date_str = current_time.strftime('%Y-%m-%d')
-            time_str = current_time.strftime('%H-%M-%S')
-            filename = os.path.join('data', f"zerodha_news_report_{date_str}_{time_str}.txt")
+            # Use consistent timestamp format
+            timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+            filename = os.path.join('data', f"zerodha_news_report_{timestamp}.txt")
         
         try:
+            # Ensure data directory exists
+            os.makedirs('data', exist_ok=True)
+            
+            # Save with UTF-8 encoding for emojis
             with open(filename, 'w', encoding='utf-8') as f:
                 f.write(report)
-            logger.info(f"Report saved to: {filename}")
+            logger.info(f"📄 Report saved to: {filename}")
             return filename
         except Exception as e:
-            logger.error(f"Error saving report: {e}")
+            logger.error(f"❌ Error saving report: {e}")
             return None
 
 def main():
     """Main function to run the complete news scraping and analysis pipeline."""
+    # Load environment variables
+    load_dotenv()
+    
     print("🚀 Starting Zerodha News Analysis Pipeline...")
     
     # Create data directory if it doesn't exist
@@ -486,6 +603,13 @@ def main():
     start_time = datetime.now()
     print(f"\n📅 Report Generation Started: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
     
+    # Get Telegram credentials from environment variables
+    telegram_token = os.getenv('TELEGRAM_BOT_TOKEN')
+    telegram_chat_id = os.getenv('TELEGRAM_CHAT_ID')
+    
+    if not telegram_token or not telegram_chat_id:
+        print("⚠️  Telegram credentials not found. Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID environment variables to enable Telegram notifications.")
+    
     # Step 1: Scrape news
     print("\n📰 Step 1: Scraping news from Zerodha Pulse...")
     news_data = scrape_pulse_zerodha()
@@ -494,7 +618,7 @@ def main():
         print("❌ Failed to scrape news. Exiting...")
         return
     
-    # Step 2: Initialize analyzer
+    # Step 2: Initialize analyzer with Telegram bot if credentials are available
     print("\n🔧 Step 2: Initializing Financial News Analyzer...")
     analyzer = StreamlinedFinancialNewsAnalyzer()
     
@@ -518,6 +642,100 @@ def main():
     
     if saved_file:
         print(f"\n💾 Report saved to: {saved_file}")
+        
+        # Send to Telegram if credentials are available
+        if telegram_token and telegram_chat_id:
+            try:
+                print("\n📱 Sending report to Telegram...")
+                telegram_bot = TelegramBot(telegram_token, telegram_chat_id)
+                
+                # Get the complete report text, removing decorative lines
+                report_lines = []
+                
+                # Add a clear header
+                report_lines.append("<b>📊 FINANCIAL NEWS REPORT</b>")
+                report_lines.append(f"<b>Generated:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                
+                # Process each line with proper formatting
+                for line in report.split('\n'):
+                    line = line.strip()
+                    # Skip decorative lines
+                    if not line or line.startswith('╔') or line.startswith('║') or line.startswith('╚'):
+                        continue
+                        
+                    # Format section headers
+                    if line.startswith('**') and line.endswith('**'):
+                        # Add extra newline before section headers
+                        report_lines.append('')
+                        line = f"<b>{line[2:-2].upper()}</b>"  # Remove ** and make uppercase
+                    elif line.startswith('*'):
+                        # Format subsection headers
+                        line = f"<b>{line[1:]}</b>" if line.endswith('*') else f"<b>{line[1:]}</b>"
+                    
+                    # Format bullet points and numbering
+                    if line.startswith('- '):
+                        line = f"• {line[2:]}"
+                    elif re.match(r'^\d+\.\s', line):
+                        # Keep numbered lists as is
+                        pass
+                    
+                    # No need to escape special characters for HTML
+                    report_lines.append(line)
+                
+                # Add footer with analysis info
+                report_lines.append('\n<b>Analysis Information</b>')
+                report_lines.append(f"• Total News Items Analyzed: {results['total_news_items']}")
+                report_lines.append(f"• AI Analysis Calls: {results['api_calls_used']}")
+                report_lines.append(f"• Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                
+                # Join lines and split into chunks if needed
+                full_report = '\n'.join(report_lines)
+                
+                # Split the report into chunks if it exceeds the limit
+                chunks = []
+                max_length=4000;
+                if len(full_report) > max_length:
+                    # Split by double newlines to try to keep sections together
+                    sections = full_report.split('\n\n')
+                    current_chunk = []
+                    current_length = 0
+                    
+                    for section in sections:
+                        if current_length + len(section) + 2 > max_length:
+                            if current_chunk:
+                                chunks.append('\n\n'.join(current_chunk))
+                            current_chunk = [section]
+                            current_length = len(section)
+                        else:
+                            current_chunk.append(section)
+                            current_length += len(section) + 2
+                    
+                    if current_chunk:
+                        chunks.append('\n\n'.join(current_chunk))
+                else:
+                    chunks = [full_report]
+                
+                # Send each chunk as a separate message
+                for i, chunk in enumerate(chunks, 1):
+                    try:
+                        # Add part number if there are multiple chunks
+                        if len(chunks) > 1:
+                            message = f"<b>📊 Financial News Report (Part {i}/{len(chunks)})</b>\n\n{chunk}"
+                        else:
+                            message = f"<b>📊 Financial News Report</b>\n\n{chunk}"
+                            
+                        # Use parse_mode='HTML' instead of 'Markdown'
+                        if telegram_bot.send_message(message, parse_mode='HTML'):
+                            print(f"✅ Successfully sent part {i}/{len(chunks)} to Telegram")
+                        else:
+                            print(f"❌ Failed to send part {i}/{len(chunks)} to Telegram")
+                    except Exception as e:
+                        print(f"❌ Error sending part {i}/{len(chunks)} to Telegram: {e}")
+                
+                print("📱 Telegram notification complete!")
+                
+            except Exception as e:
+                print(f"❌ Error sending to Telegram: {e}")
     
     end_time = datetime.now()
     duration = end_time - start_time
