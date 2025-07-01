@@ -654,7 +654,7 @@ def main():
                 
                 # Add a clear header
                 report_lines.append("<b>📊 FINANCIAL NEWS REPORT</b>")
-                report_lines.append(f"<b>Generated:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                report_lines.append(f"<b>Generated:</b> {get_ist_time().strftime('%Y-%m-%d %H:%M:%S')} IST\n")
                 
                 # Process each line with proper formatting
                 for line in report.split('\n'):
